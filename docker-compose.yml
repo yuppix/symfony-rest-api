@@ -1,0 +1,136 @@
+version: "3.8"
+
+services:
+  api-nginx:
+    image: rolandrajko/symfony-nginx
+    volumes:
+      - ./api/public:/usr/share/nginx/html:ro
+      - ./docker/volumes/symfony-nginx/nginx.conf.tpl:/etc/nginx/nginx.conf.tpl:ro
+    ports:
+      - "80:80"
+      - "8080:8080"
+    environment:
+      - NGINX_FCGI_ADDRESS=api-php:9000
+      - NGINX_ORIGIN=(.*\.)?${DOMAIN}
+    depends_on:
+      - api-php
+    restart: always
+    networks:
+      - net_local
+
+  api-php:
+    build:
+      context: .
+      dockerfile: docker/images/symfony-php/Dockerfile
+      target: dev
+    volumes:
+      - ./api:/var/www/html:rw,cached
+      - /var/www/html/var
+    depends_on:
+      - mysql
+      - redis
+      - elasticmq
+    restart: always
+    networks:
+      - net_local
+
+  mysql:
+    image: mysql:5.7
+    ports:
+      - "3306:3306"
+    environment:
+      - MYSQL_DATABASE=${MYSQL_DATABASE}
+      - MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD}
+    command:
+      - "--character-set-server=utf8mb4"
+      - "--collation-server=utf8mb4_unicode_ci"
+    restart: always
+    networks:
+      - net_local
+
+  redis:
+    image: redis:6.0-alpine
+    restart: always
+    networks:
+      - net_local
+
+  elasticmq:
+    image: softwaremill/elasticmq-native:1.4.5
+    ports:
+      - "9324:9324"
+      - "9325:9325"
+    volumes:
+      - ./docker/volumes/elasticmq/elasticmq.conf:/opt/elasticmq.conf:ro
+    restart: always
+    networks:
+      - net_local
+
+  mailhog:
+    build: https://github.com/mailhog/MailHog.git
+    ports:
+      - "8025:8025"
+    restart: always
+    networks:
+      - net_local
+    profiles: ["dev"]
+
+  minio:
+    image: minio/minio:RELEASE.2021-06-07T21-40-51Z
+    ports:
+      - "9000:9000"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+      - MINIO_DOMAIN=s3.${DOMAIN}:9000
+      - MINIO_REGION_NAME=${MINIO_REGION_NAME}
+    command: "server /data"
+    restart: always
+    networks:
+      net_local:
+        aliases:
+          - files.s3.${DOMAIN}
+          - s3.${DOMAIN}
+
+  mc:
+    image: minio/mc:RELEASE.2021-05-26T19-19-26Z
+    depends_on:
+      - minio
+    volumes:
+      - ./docker/volumes/mc/setup.sh:/setup.sh:ro
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD}
+      - SERVICE_ENDPOINT=http://minio:9000
+      - BUCKETS=files
+    entrypoint: sh
+    command: [ "-c", "/setup.sh" ]
+    networks:
+      - net_local
+    restart: on-failure
+
+  messenger-consumer:
+    build:
+      context: .
+      dockerfile: docker/images/symfony-php/Dockerfile
+      target: dev
+    environment:
+      - FPM_CPU_CORES=0.5
+      - FPM_TOTAL_RAM=1024
+      - FPM_PROCESS_SIZE=32
+      - COMPOSER_TEST_NO_DB=1
+    volumes:
+      - ./api:/var/www/html:rw,cached
+      - /var/www/html/var
+    depends_on:
+      - mysql
+      - redis
+      - elasticmq
+      - mailhog
+    restart: always
+    networks:
+      - net_local
+    profiles: ["dev"]
+
+networks:
+  net_local:
+    driver: bridge
